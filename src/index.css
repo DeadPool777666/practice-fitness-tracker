@@ -14,6 +14,11 @@
   --green: #a9df4b;
   --deep-green: #183d2e;
   --orange: #eb7047;
+  --surface: #ffffff;
+  --tint: #eef3e3;
+  --tint-2: #e3ebd5;
+  --heat-1: #dcefb5;
+  --heat-2: #c2e47f;
   --display: 'Oswald', Impact, sans-serif;
 }
 
@@ -25,3 +30,21 @@ a { color: inherit; }
 button { color: inherit; }
 ::selection { color: var(--ink); background: var(--green); }
 :focus-visible { outline: 3px solid #e16b44; outline-offset: 3px; }
+
+/* Тёмная тема: переопределяем только переменные, фирменные зелёный / оранжевый / кремовый остаются основой */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  color: #e8efe9;
+  background: #0f1a15;
+  --ink: #e8efe9;
+  --muted: #9db0a3;
+  --line: #2a3a31;
+  --paper: #15211b;
+  --surface: #1a2820;
+  --tint: #1e2f26;
+  --tint-2: #243a2e;
+  --heat-1: #28422f;
+  --heat-2: #3d6b2f;
+}
+:root[data-theme='dark'] .auth-stamp { color: #19241f; }
+:root[data-theme='dark'] .topbar, :root[data-theme='dark'] .site-footer { background: transparent; }

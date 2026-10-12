@@ -87,3 +87,17 @@ test('age-specific workout groups and guidance', () => {
   assert.equal(russianCount(3, ['запись', 'записи', 'записей']), '3 записи')
   assert.equal(russianCount(12, ['план', 'плана', 'планов']), '12 планов')
 })
+
+test('workout type: default, valid value and rejection of unknown type', async () => {
+  const register = await api('/api/auth/register', { method: 'POST', body: JSON.stringify({ name: 'Тип Тест', email: 'type@example.test', password: 'secure-password-123', age: 30, height: 175, weight: 70 }) })
+  const token = register.body.token
+  const base = { title: 'Проверка типа', date: '2026-10-01', duration: 20, intensity: 'Низкая' }
+  const withoutType = await api('/api/workouts', { method: 'POST', token, body: JSON.stringify(base) })
+  assert.equal(withoutType.body.type, 'Другое')
+  const cardio = await api('/api/workouts', { method: 'POST', token, body: JSON.stringify({ ...base, type: 'Кардио' }) })
+  assert.equal(cardio.body.type, 'Кардио')
+  const updated = await api(`/api/workouts/${cardio.body.id}`, { method: 'PUT', token, body: JSON.stringify({ ...cardio.body, type: 'Кор' }) })
+  assert.equal(updated.body.type, 'Кор')
+  const invalid = await api('/api/workouts', { method: 'POST', token, body: JSON.stringify({ ...base, type: 'Йога' }) })
+  assert.equal(invalid.status, 400)
+})

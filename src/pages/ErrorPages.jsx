@@ -6,5 +6,5 @@ export function AccessDeniedPage() {
 }
 
 export function NotFoundPage() {
-  return <div className="error-page"><span className="not-found-code">404</span><span className="section-index">МАРШРУТ НЕ НАЙДЕН</span><h1>Кажется, ты<br />свернул не туда.</h1><p>Такой страницы нет, но путь к прогрессу открыт.</p><Link className="button button-dark" to="/"><ArrowLeft size={16} />На главную</Link></div>
+  return <div className="error-page"><span className="not-found-code">404</span><span className="section-index">МАРШРУТ НЕ НАЙДЕН</span><h1>Похоже, ты<br />пропустил повтор.</h1><p>Такой страницы нет, но путь к прогрессу открыт.</p><Link className="button button-dark" to="/"><ArrowLeft size={16} />На главную</Link> <Link className="button button-quiet" to="/dashboard">К дашборду</Link></div>
 }

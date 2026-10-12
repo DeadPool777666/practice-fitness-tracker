@@ -3,19 +3,31 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import bcrypt from 'bcryptjs'
-import jwt from 'jsonwebtoken'
 import rateLimit from 'express-rate-limit'
 import { resolve } from 'node:path'
 import { db } from './db.js'
+import { issueToken, jwtSecret, requireAuth } from './auth.js'
+import { isPro } from './billing.js'
+import { detectPersonalRecords, syncProgress } from './progress.js'
+import { normalizeWorkout, validNumber } from './validate.js'
+import { progressRouter } from './routes/progress.js'
+import { libraryRouter } from './routes/library.js'
+import { planningRouter } from './routes/planning.js'
+import { socialRouter } from './routes/social.js'
+import { accountRouter } from './routes/account.js'
+import { adminRouter } from './routes/admin.js'
 
 const app = express()
 const port = Number(process.env.PORT || 3001)
-const jwtSecret = process.env.JWT_SECRET || 'local-development-secret-change-me'
-const allowedIntensities = ['Низкая', 'Средняя', 'Высокая', 'Экстремальная']
+const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase()
 
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
   throw new Error('JWT_SECRET must be set in production')
 }
+void jwtSecret
+
+// Первый администратор назначается через ADMIN_EMAIL (роль хранится в БД и проверяется на сервере)
+if (adminEmail) db.prepare("UPDATE users SET role = 'admin' WHERE email = ?").run(adminEmail)
 
 app.disable('x-powered-by')
 app.use(helmet())
@@ -25,10 +37,6 @@ app.use(express.json({ limit: '32kb' }))
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false })
 const authRouter = express.Router()
 authRouter.use(authLimiter)
-
-function validNumber(value, min, max) {
-  return Number.isFinite(Number(value)) && Number(value) >= min && Number(value) <= max
-}
 
 function toPublicUser(user) {
   return {
@@ -40,45 +48,10 @@ function toPublicUser(user) {
     weight: user.weight_kg,
     gender: user.gender,
     skillLevel: user.skill_level,
+    role: user.role,
+    isPublic: Boolean(user.is_public),
+    isPro: isPro(user.id),
   }
-}
-
-function issueToken(user) {
-  return jwt.sign({ sub: String(user.id) }, jwtSecret, { expiresIn: '7d' })
-}
-
-function requireAuth(request, response, next) {
-  const token = request.get('authorization')?.replace(/^Bearer\s+/i, '')
-  if (!token) return response.status(401).json({ error: 'Требуется авторизация' })
-
-  try {
-    const payload = jwt.verify(token, jwtSecret)
-    request.userId = Number(payload.sub)
-    next()
-  } catch {
-    response.status(401).json({ error: 'Сессия истекла. Войдите снова.' })
-  }
-}
-
-function normalizeWorkout(body) {
-  const { title, date, duration, intensity, exercises = [], notes = '', completed = false } = body ?? {}
-  if (typeof title !== 'string' || title.trim().length < 2 || title.trim().length > 100) return 'Название должно содержать от 2 до 100 символов'
-  const parsedDate = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00Z`) : null
-  if (!parsedDate || Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== date) return 'Укажите корректную дату'
-  if (!Number.isInteger(Number(duration)) || !validNumber(duration, 1, 600)) return 'Длительность должна быть от 1 до 600 минут'
-  if (!allowedIntensities.includes(intensity)) return 'Укажите допустимую интенсивность'
-  if (!Array.isArray(exercises) || exercises.length > 50) return 'Список упражнений некорректен'
-  const cleanExercises = []
-  for (const exercise of exercises) {
-    if (typeof exercise?.name !== 'string' || !exercise.name.trim() || exercise.name.length > 100) return 'Проверьте названия упражнений'
-    if (!Number.isInteger(Number(exercise.sets)) || !Number.isInteger(Number(exercise.reps)) || !validNumber(exercise.sets, 1, 100) || !validNumber(exercise.reps, 1, 1000)) return 'Подходы и повторения должны быть целыми положительными числами'
-    const weight = exercise.weight === '' || exercise.weight == null ? null : Number(exercise.weight)
-    if (weight !== null && !validNumber(weight, 0, 1000)) return 'Вес должен быть от 0 до 1000 кг'
-    cleanExercises.push({ name: exercise.name.trim(), sets: Number(exercise.sets), reps: Number(exercise.reps), weight })
-  }
-  if (typeof notes !== 'string' || notes.length > 2000) return 'Заметка не должна превышать 2000 символов'
-  if (typeof completed !== 'boolean') return 'Статус выполнения некорректен'
-  return { title: title.trim(), date, duration: Number(duration), intensity, exercises: cleanExercises, notes: notes.trim(), completed }
 }
 
 function mapWorkout(row) {
@@ -89,9 +62,12 @@ function mapWorkout(row) {
     date: row.date,
     duration: row.duration,
     intensity: row.intensity,
+    type: row.type,
     exercises: JSON.parse(row.exercises),
     notes: row.notes,
     completed: Boolean(row.completed),
+    mood: row.mood,
+    shared: Boolean(row.shared),
   }
 }
 
@@ -106,8 +82,9 @@ authRouter.post('/register', async (request, response, next) => {
     if (!['Мужской', 'Женский', 'Не указано'].includes(gender) || !['Новичок', 'Средний', 'Продвинутый'].includes(skillLevel)) return response.status(400).json({ error: 'Проверьте параметры профиля' })
 
     const passwordHash = await bcrypt.hash(password, 12)
-    const result = db.prepare(`INSERT INTO users (name, email, password_hash, age, height_cm, weight_kg, gender, skill_level)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(name.trim(), normalizedEmail, passwordHash, Number(age), Number(height), Number(weight), gender, skillLevel)
+    const role = adminEmail && normalizedEmail === adminEmail ? 'admin' : 'user'
+    const result = db.prepare(`INSERT INTO users (name, email, password_hash, age, height_cm, weight_kg, gender, skill_level, role)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(name.trim(), normalizedEmail, passwordHash, Number(age), Number(height), Number(weight), gender, skillLevel, role)
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid)
     response.status(201).json({ user: toPublicUser(user), token: issueToken(user) })
   } catch (error) {
@@ -122,6 +99,7 @@ authRouter.post('/login', async (request, response, next) => {
     const password = typeof request.body?.password === 'string' ? request.body.password : ''
     const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email)
     if (!user || !(await bcrypt.compare(password, user.password_hash))) return response.status(401).json({ error: 'Неверный email или пароль' })
+    if (user.blocked) return response.status(403).json({ error: 'Аккаунт заблокирован администратором' })
     response.json({ user: toPublicUser(user), token: issueToken(user) })
   } catch (error) {
     next(error)
@@ -132,12 +110,19 @@ app.get('/api/health', (_request, response) => response.json({ status: 'ok' }))
 app.use('/api/auth', authRouter)
 app.get('/api/auth/me', requireAuth, (request, response) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(request.userId)
-  if (!user) return response.status(401).json({ error: 'Пользователь не найден' })
   response.json({ user: toPublicUser(user) })
 })
 
 const workouts = express.Router()
 workouts.use(requireAuth)
+const findWorkout = (id, userId) => db.prepare('SELECT * FROM workouts WHERE id = ? AND user_id = ?').get(id, userId)
+
+// После любого изменения тренировок пересчитываем достижения, цели, челленджи и задания дня
+function afterChange(userId, workout, workoutId) {
+  if (workout) detectPersonalRecords(userId, workout, workoutId)
+  syncProgress(userId)
+}
+
 workouts.get('/', (request, response) => {
   const rows = db.prepare('SELECT * FROM workouts WHERE user_id = ? ORDER BY date DESC, id DESC').all(request.userId)
   response.json(rows.map(mapWorkout))
@@ -145,23 +130,35 @@ workouts.get('/', (request, response) => {
 workouts.post('/', (request, response) => {
   const workout = normalizeWorkout(request.body)
   if (typeof workout === 'string') return response.status(400).json({ error: workout })
-  const result = db.prepare(`INSERT INTO workouts (user_id, title, date, duration, intensity, exercises, notes, completed)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(request.userId, workout.title, workout.date, workout.duration, workout.intensity, JSON.stringify(workout.exercises), workout.notes, Number(workout.completed))
-  const row = db.prepare('SELECT * FROM workouts WHERE id = ? AND user_id = ?').get(result.lastInsertRowid, request.userId)
-  response.status(201).json(mapWorkout(row))
+  const result = db.prepare(`INSERT INTO workouts (user_id, title, date, duration, intensity, type, exercises, notes, completed, mood)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(request.userId, workout.title, workout.date, workout.duration, workout.intensity, workout.type, JSON.stringify(workout.exercises), workout.notes, Number(workout.completed), workout.mood)
+  afterChange(request.userId, workout, result.lastInsertRowid)
+  response.status(201).json(mapWorkout(findWorkout(result.lastInsertRowid, request.userId)))
 })
 workouts.get('/:id', (request, response) => {
-  const row = db.prepare('SELECT * FROM workouts WHERE id = ? AND user_id = ?').get(Number(request.params.id), request.userId)
+  const row = findWorkout(Number(request.params.id), request.userId)
   if (!row) return response.status(404).json({ error: 'Тренировка не найдена' })
   response.json(mapWorkout(row))
 })
 workouts.put('/:id', (request, response) => {
   const workout = normalizeWorkout(request.body)
   if (typeof workout === 'string') return response.status(400).json({ error: workout })
-  const result = db.prepare(`UPDATE workouts SET title = ?, date = ?, duration = ?, intensity = ?, exercises = ?, notes = ?, completed = ?
-    WHERE id = ? AND user_id = ?`).run(workout.title, workout.date, workout.duration, workout.intensity, JSON.stringify(workout.exercises), workout.notes, Number(workout.completed), Number(request.params.id), request.userId)
+  const id = Number(request.params.id)
+  const result = db.prepare(`UPDATE workouts SET title = ?, date = ?, duration = ?, intensity = ?, type = ?, exercises = ?, notes = ?, completed = ?, mood = ?
+    WHERE id = ? AND user_id = ?`).run(workout.title, workout.date, workout.duration, workout.intensity, workout.type, JSON.stringify(workout.exercises), workout.notes, Number(workout.completed), workout.mood, id, request.userId)
   if (!result.changes) return response.status(404).json({ error: 'Тренировка не найдена' })
-  response.json(mapWorkout(db.prepare('SELECT * FROM workouts WHERE id = ? AND user_id = ?').get(Number(request.params.id), request.userId)))
+  if (!workout.completed) db.prepare('UPDATE workouts SET shared = 0 WHERE id = ?').run(id)
+  afterChange(request.userId, workout, id)
+  response.json(mapWorkout(findWorkout(id, request.userId)))
+})
+workouts.put('/:id/share', (request, response) => {
+  const id = Number(request.params.id)
+  const row = findWorkout(id, request.userId)
+  if (!row) return response.status(404).json({ error: 'Тренировка не найдена' })
+  if (typeof request.body?.shared !== 'boolean') return response.status(400).json({ error: 'Укажите shared: true или false' })
+  if (request.body.shared && !row.completed) return response.status(400).json({ error: 'Поделиться можно только выполненной тренировкой' })
+  db.prepare('UPDATE workouts SET shared = ? WHERE id = ?').run(Number(request.body.shared), id)
+  response.json(mapWorkout(findWorkout(id, request.userId)))
 })
 workouts.delete('/:id', (request, response) => {
   const result = db.prepare('DELETE FROM workouts WHERE id = ? AND user_id = ?').run(Number(request.params.id), request.userId)
@@ -169,6 +166,8 @@ workouts.delete('/:id', (request, response) => {
   response.status(204).end()
 })
 app.use('/api/workouts', workouts)
+
+app.use('/api', libraryRouter, progressRouter, planningRouter, socialRouter, accountRouter, adminRouter)
 
 app.use('/api', (_request, response) => response.status(404).json({ error: 'Маршрут API не найден' }))
 if (process.env.NODE_ENV === 'production') {

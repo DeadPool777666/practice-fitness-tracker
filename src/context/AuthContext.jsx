@@ -21,10 +21,16 @@ export function AuthProvider({ children }) {
     return result.user
   }
 
+  async function refresh() {
+    const { user: currentUser } = await authApi.me()
+    setUser(currentUser)
+    return currentUser
+  }
+
   function logout() {
     localStorage.removeItem('fittrack-token')
     setUser(null)
   }
 
-  return <AuthContext.Provider value={{ user, loading, login: (data) => authenticate('login', data), register: (data) => authenticate('register', data), logout }}>{children}</AuthContext.Provider>
+  return <AuthContext.Provider value={{ user, loading, login: (data) => authenticate('login', data), register: (data) => authenticate('register', data), logout, refresh }}>{children}</AuthContext.Provider>
 }
