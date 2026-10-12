@@ -69,6 +69,14 @@ test('admin role: server-side checks, not just hidden buttons', async () => {
   assert.equal((await api(`/api/admin/users/${admin.body.user.id}`, { method: 'PATCH', token: admin.body.token, body: { blocked: true } })).status, 400)
 })
 
+test('content security policy allows required external app resources', async () => {
+  const response = await fetch(`${baseUrl}/api/health`)
+  const policy = response.headers.get('content-security-policy')
+  assert.ok(policy)
+  assert.match(policy, /connect-src[^;]*https:\/\/dummyjson\.com/)
+  assert.match(policy, /img-src[^;]*https:\/\/images\.unsplash\.com/)
+})
+
 test('progress: achievements, XP, goals, challenges, quests and notifications', async () => {
   const { body: { token } } = await register('progress@example.test')
   assert.equal((await api('/api/progress')).status, 401)
@@ -83,7 +91,7 @@ test('progress: achievements, XP, goals, challenges, quests and notifications', 
   assert.equal((await api('/api/challenges/3/join', { token, method: 'POST' })).status, 409)
 
   await api('/api/workouts', { token, body: workout({ type: 'Кардио' }) })
-  await api('/api/workouts', { token, body: workout({ type: 'Кардио', date: today().slice(0, 8) + '01' }) })
+  await api('/api/workouts', { token, body: workout({ type: 'Кардио', date: today() }) })
   const progress = await api('/api/progress', { token })
   assert.ok(progress.body.achievements.find((a) => a.code === 'first').unlocked)
   assert.ok(progress.body.xp >= 2 * 100 + 300)

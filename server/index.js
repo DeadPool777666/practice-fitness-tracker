@@ -30,7 +30,14 @@ void jwtSecret
 if (adminEmail) db.prepare("UPDATE users SET role = 'admin' WHERE email = ?").run(adminEmail)
 
 app.disable('x-powered-by')
-app.use(helmet())
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      connectSrc: ["'self'", 'https://dummyjson.com'],
+      imgSrc: ["'self'", 'data:', 'https://images.unsplash.com', 'https:'],
+    },
+  },
+}))
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }))
 app.use(express.json({ limit: '32kb' }))
 
